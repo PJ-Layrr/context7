@@ -53,6 +53,45 @@ if (PROXY_URL && !PROXY_URL.startsWith("$") && /^(http|https):\/\//i.test(PROXY_
   }
 }
 
+const FETCH_TIMEOUT_MS = Number(process.env.CONTEXT7_FETCH_TIMEOUT_MS ?? 8000);
+const FETCH_RETRY_COUNT = Number(process.env.CONTEXT7_FETCH_RETRY_COUNT ?? 2);
+const FETCH_RETRY_BACKOFF_MS = Number(process.env.CONTEXT7_FETCH_RETRY_BACKOFF_MS ?? 200);
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchWithRetry(
+  url: URL,
+  init: RequestInit,
+  options: { timeoutMs: number; retries: number; backoffMs: number }
+): Promise<Response> {
+  let attempt = 0;
+
+  while (true) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      if (
+        response.ok ||
+        attempt >= options.retries ||
+        (response.status < 500 && response.status !== 429)
+      ) {
+        return response;
+      }
+    } catch (error) {
+      if (attempt >= options.retries) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    attempt += 1;
+    await wait(options.backoffMs * Math.pow(2, attempt - 1));
+  }
+}
+
 /**
  * Searches for libraries matching the given query
  * @param query The user's question or task (used for LLM relevance ranking)
@@ -72,7 +111,11 @@ export async function searchLibraries(
 
     const headers = generateHeaders(context);
 
-    const response = await fetch(url, { headers });
+    const response = await fetchWithRetry(url, { headers }, {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      retries: FETCH_RETRY_COUNT,
+      backoffMs: FETCH_RETRY_BACKOFF_MS,
+    });
     if (!response.ok) {
       const errorMessage = await parseErrorResponse(response, context.apiKey);
       console.error(errorMessage);
@@ -104,7 +147,11 @@ export async function fetchLibraryContext(
 
     const headers = generateHeaders(context);
 
-    const response = await fetch(url, { headers });
+    const response = await fetchWithRetry(url, { headers }, {
+      timeoutMs: FETCH_TIMEOUT_MS,
+      retries: FETCH_RETRY_COUNT,
+      backoffMs: FETCH_RETRY_BACKOFF_MS,
+    });
     if (!response.ok) {
       const errorMessage = await parseErrorResponse(response, context.apiKey);
       console.error(errorMessage);

@@ -1,5 +1,5 @@
 # ----- Build Stage -----
-FROM node:lts-alpine AS builder
+FROM node:lts-alpine@sha256:4f696fbf39f383c1e486030ba6b289a5d9af541642fc78ab197e584a113b9c03 AS builder
 RUN corepack enable pnpm
 WORKDIR /app
 
@@ -12,7 +12,7 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @upstash/context7-mcp build
 
 # ----- Production Stage -----
-FROM node:lts-alpine
+FROM node:lts-alpine@sha256:4f696fbf39f383c1e486030ba6b289a5d9af541642fc78ab197e584a113b9c03
 RUN corepack enable pnpm
 WORKDIR /app
 
@@ -23,6 +23,10 @@ RUN pnpm install --frozen-lockfile --prod --filter @upstash/context7-mcp
 
 # Copy built files from builder
 COPY --from=builder /app/packages/mcp/dist ./packages/mcp/dist
+
+RUN chown -R node:node /app
+
+USER node
 
 WORKDIR /app/packages/mcp
 EXPOSE 8080

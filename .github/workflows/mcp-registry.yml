@@ -45,7 +45,13 @@ jobs:
 
       - name: Install MCP Publisher
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/download/v1.4.0/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          OS_NAME=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH_NAME=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          PUBLISHER_TARBALL="mcp-publisher_${OS_NAME}_${ARCH_NAME}.tar.gz"
+          curl -L -o "$PUBLISHER_TARBALL" "https://github.com/modelcontextprotocol/registry/releases/download/v1.4.0/${PUBLISHER_TARBALL}"
+          curl -L -o registry_checksums.txt "https://github.com/modelcontextprotocol/registry/releases/download/v1.4.0/registry_1.4.0_checksums.txt"
+          grep " ${PUBLISHER_TARBALL}$" registry_checksums.txt | sha256sum -c -
+          tar xz "${PUBLISHER_TARBALL}" mcp-publisher
 
       - name: Login to MCP Registry
         run: ./mcp-publisher login github-oidc

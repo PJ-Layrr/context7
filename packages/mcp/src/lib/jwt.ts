@@ -11,16 +11,34 @@ export interface JWTValidationResult {
   error?: string;
 }
 
+export interface JWTValidationOptions {
+  audience: string;
+  authorizedParty: string;
+}
+
 export function isJWT(token: string): boolean {
   const parts = token.split(".");
   return parts.length === 3;
 }
 
-export async function validateJWT(token: string): Promise<JWTValidationResult> {
+export async function validateJWT(
+  token: string,
+  options: JWTValidationOptions
+): Promise<JWTValidationResult> {
   try {
-    await jose.jwtVerify(token, jwks, {
+    const { audience, authorizedParty } = options;
+    if (!audience || !authorizedParty) {
+      return { valid: false, error: "JWT audience/authorized party not configured" };
+    }
+
+    const { payload } = await jose.jwtVerify(token, jwks, {
       issuer: ISSUER,
+      audience,
     });
+
+    if (payload.azp !== authorizedParty) {
+      return { valid: false, error: "Invalid authorized party" };
+    }
 
     return { valid: true };
   } catch (error) {

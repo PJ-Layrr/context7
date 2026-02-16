@@ -16,6 +16,22 @@ import { SERVER_VERSION, RESOURCE_URL, AUTH_SERVER_URL } from "./lib/constants.j
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
 
+const REQUEST_BODY_LIMIT = process.env.MCP_REQUEST_BODY_LIMIT || "1mb";
+const RATE_LIMIT_WINDOW_MS = Number(process.env.MCP_RATE_LIMIT_WINDOW_MS ?? 60_000);
+const RATE_LIMIT_MAX = Number(process.env.MCP_RATE_LIMIT_MAX ?? 60);
+const CONCURRENCY_MAX = Number(process.env.MCP_CONCURRENCY_MAX ?? 64);
+const TRUST_PROXY = process.env.MCP_TRUST_PROXY === "true";
+const TRUSTED_PROXY_IPS = new Set(
+  (process.env.MCP_TRUSTED_PROXY_IPS ?? "")
+    .split(",")
+    .map((ip) => ip.trim())
+    .filter(Boolean)
+);
+const JWT_AUDIENCE = process.env.CONTEXT7_JWT_AUDIENCE || RESOURCE_URL;
+const JWT_AUTHORIZED_PARTY = process.env.CONTEXT7_JWT_AZP || "context7-mcp";
+const OAUTH_METADATA_TIMEOUT_MS = Number(process.env.MCP_OAUTH_METADATA_TIMEOUT_MS ?? 5000);
+const OAUTH_METADATA_RETRY_COUNT = Number(process.env.MCP_OAUTH_METADATA_RETRY_COUNT ?? 2);
+
 // Parse CLI arguments using commander
 const program = new Command()
   .option("--transport <stdio|http>", "transport type", "stdio")
@@ -89,6 +105,18 @@ function getClientContext(): ClientContext {
   };
 }
 
+function normalizeIp(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.replace(/^::ffff:/, "");
+}
+
+function isTrustedProxy(req: express.Request): boolean {
+  if (TRUST_PROXY) return true;
+  const remoteAddress = normalizeIp(req.socket?.remoteAddress);
+  if (!remoteAddress) return false;
+  return TRUSTED_PROXY_IPS.has(remoteAddress);
+}
+
 /**
  * Extract client IP address from request headers.
  * Handles X-Forwarded-For header for proxied requests.
@@ -96,7 +124,7 @@ function getClientContext(): ClientContext {
 function getClientIp(req: express.Request): string | undefined {
   const forwardedFor = req.headers["x-forwarded-for"] || req.headers["X-Forwarded-For"];
 
-  if (forwardedFor) {
+  if (forwardedFor && isTrustedProxy(req)) {
     const ips = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
     const ipList = ips.split(",").map((ip) => ip.trim());
 
@@ -110,13 +138,47 @@ function getClientIp(req: express.Request): string | undefined {
         return plainIp;
       }
     }
-    return ipList[0].replace(/^::ffff:/, "");
+    return normalizeIp(ipList[0]);
   }
 
   if (req.socket?.remoteAddress) {
-    return req.socket.remoteAddress.replace(/^::ffff:/, "");
+    return normalizeIp(req.socket.remoteAddress);
   }
   return undefined;
+}
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchWithTimeoutAndRetry(
+  url: string,
+  options: { timeoutMs: number; retries: number }
+): Promise<Response> {
+  let attempt = 0;
+
+  while (true) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
+
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (
+        response.ok ||
+        attempt >= options.retries ||
+        (response.status < 500 && response.status !== 429)
+      ) {
+        return response;
+      }
+    } catch (error) {
+      if (attempt >= options.retries) {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    attempt += 1;
+    await wait(200 * Math.pow(2, attempt - 1));
+  }
 }
 
 const server = new McpServer(
@@ -273,7 +335,68 @@ async function main() {
     const initialPort = CLI_PORT ?? DEFAULT_PORT;
 
     const app = express();
-    app.use(express.json());
+    app.set("trust proxy", TRUST_PROXY || TRUSTED_PROXY_IPS.size > 0 ? 1 : false);
+    app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+
+    let activeRequests = 0;
+    app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (req.method === "OPTIONS") {
+        next();
+        return;
+      }
+
+      if (activeRequests >= CONCURRENCY_MAX) {
+        res.status(503).json({
+          error: "overloaded",
+          message: "Server is busy. Please retry shortly.",
+        });
+        return;
+      }
+
+      activeRequests += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        if (activeRequests > 0) {
+          activeRequests -= 1;
+        }
+      };
+
+      res.on("finish", release);
+      res.on("close", release);
+      next();
+    });
+
+    const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+    app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (req.method === "OPTIONS") {
+        next();
+        return;
+      }
+
+      const key = getClientIp(req) ?? normalizeIp(req.socket?.remoteAddress) ?? "unknown";
+      const now = Date.now();
+      const entry = rateLimitStore.get(key);
+
+      if (!entry || now >= entry.resetAt) {
+        rateLimitStore.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+        next();
+        return;
+      }
+
+      if (entry.count >= RATE_LIMIT_MAX) {
+        res.setHeader("Retry-After", Math.ceil((entry.resetAt - now) / 1000).toString());
+        res.status(429).json({
+          error: "rate_limited",
+          message: "Too many requests. Please retry later.",
+        });
+        return;
+      }
+
+      entry.count += 1;
+      next();
+    });
 
     app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -320,7 +443,7 @@ async function main() {
     const handleMcpRequest = async (
       req: express.Request,
       res: express.Response,
-      requireAuth: boolean
+      options: { requireAuth: boolean; requireJwt: boolean }
     ) => {
       try {
         const apiKey = extractApiKey(req);
@@ -333,7 +456,7 @@ async function main() {
           `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
         );
 
-        if (requireAuth) {
+        if (options.requireAuth) {
           if (!apiKey) {
             return res.status(401).json({
               jsonrpc: "2.0",
@@ -345,8 +468,22 @@ async function main() {
             });
           }
 
-          if (isJWT(apiKey)) {
-            const validationResult = await validateJWT(apiKey);
+          if (!isJWT(apiKey)) {
+            if (options.requireJwt) {
+              return res.status(401).json({
+                jsonrpc: "2.0",
+                error: {
+                  code: -32001,
+                  message: "JWT required for this endpoint.",
+                },
+                id: null,
+              });
+            }
+          } else {
+            const validationResult = await validateJWT(apiKey, {
+              audience: JWT_AUDIENCE,
+              authorizedParty: JWT_AUTHORIZED_PARTY,
+            });
             if (!validationResult.valid) {
               return res.status(401).json({
                 jsonrpc: "2.0",
@@ -394,12 +531,12 @@ async function main() {
 
     // Anonymous access endpoint - no authentication required
     app.all("/mcp", async (req, res) => {
-      await handleMcpRequest(req, res, false);
+      await handleMcpRequest(req, res, { requireAuth: false, requireJwt: false });
     });
 
     // OAuth-protected endpoint - requires authentication
     app.all("/mcp/oauth", async (req, res) => {
-      await handleMcpRequest(req, res, true);
+      await handleMcpRequest(req, res, { requireAuth: true, requireJwt: true });
     });
 
     app.get("/ping", (_req: express.Request, res: express.Response) => {
@@ -426,7 +563,10 @@ async function main() {
         const authServerUrl = AUTH_SERVER_URL;
 
         try {
-          const response = await fetch(`${authServerUrl}/.well-known/oauth-authorization-server`);
+          const response = await fetchWithTimeoutAndRetry(
+            `${authServerUrl}/.well-known/oauth-authorization-server`,
+            { timeoutMs: OAUTH_METADATA_TIMEOUT_MS, retries: OAUTH_METADATA_RETRY_COUNT }
+          );
           if (!response.ok) {
             console.error("[OAuth] Upstream error:", response.status);
             return res.status(response.status).json({

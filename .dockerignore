@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/.turbo
+.git
+.github
+.env
+.env.*
+*.log
+Dockerfile
+docker-compose.yml
+pnpm-debug.log
+npm-debug.log
+README.md
+SECURITY.md
