@@ -53,7 +53,7 @@ Check out our [project addition guide](https://context7.com/docs/adding-librarie
 
 - Node.js >= v18.0.0
 - Cursor, Claude Code, VSCode, Windsurf or another MCP Client
-- Context7 API Key (Optional) for higher rate limits and private repositories (Get yours by creating an account at [context7.com/dashboard](https://context7.com/dashboard))
+- Context7 API Key (required for HTTP transport unless `MCP_REQUIRE_AUTH=false`; optional for higher rate limits and private repositories) (Get yours by creating an account at [context7.com/dashboard](https://context7.com/dashboard))
 
 > [!TIP]
 > **Recommended Post-Setup: Add a Rule to Auto-Invoke Context7**
@@ -1367,6 +1367,7 @@ bun run dist/index.js
 
 - `--transport <stdio|http>` – Transport to use (`stdio` by default). Use `http` for remote HTTP server or `stdio` for local integration.
 - `--port <number>` – Port to listen on when using `http` transport (default `3000`).
+- `--bind <address>` – Bind address for HTTP transport (default `127.0.0.1`).
 - `--api-key <key>` – API key for authentication (or set `CONTEXT7_API_KEY` env var). You can get your API key by creating an account at [context7.com/dashboard](https://context7.com/dashboard).
 
 Example with HTTP transport and port 8080:
@@ -1390,6 +1391,15 @@ You can use the `CONTEXT7_API_KEY` environment variable instead of passing the `
 - Tools that prefer environment variable configuration
 
 **Note:** The `--api-key` CLI flag takes precedence over the environment variable when both are provided.
+
+Additional HTTP server hardening options:
+
+- `MCP_REQUIRE_AUTH` – Require authentication for `/mcp` (default `true`). Set to `false` to allow anonymous access.
+- `MCP_BIND_ADDRESS` – Bind address for HTTP transport (default `127.0.0.1`).
+- `MCP_CORS_ALLOWED_ORIGINS` – Comma-separated allowlist for CORS. Empty by default (CORS disabled).
+- `MCP_TRUST_PROXY` – Set to `true` to trust upstream proxies for `X-Forwarded-For`.
+- `MCP_TRUSTED_PROXY_IPS` – Comma-separated list of proxy IPs allowed to supply `X-Forwarded-For`.
+- `MCP_RATE_LIMIT_SWEEP_INTERVAL_MS` – Interval for evicting expired rate-limit entries (default `60000`).
 
 **Example with .env file:**
 

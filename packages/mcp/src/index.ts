@@ -15,10 +15,14 @@ import { SERVER_VERSION, RESOURCE_URL, AUTH_SERVER_URL } from "./lib/constants.j
 
 /** Default HTTP server port */
 const DEFAULT_PORT = 3000;
+const DEFAULT_BIND_ADDRESS = "127.0.0.1";
 
 const REQUEST_BODY_LIMIT = process.env.MCP_REQUEST_BODY_LIMIT || "1mb";
 const RATE_LIMIT_WINDOW_MS = Number(process.env.MCP_RATE_LIMIT_WINDOW_MS ?? 60_000);
 const RATE_LIMIT_MAX = Number(process.env.MCP_RATE_LIMIT_MAX ?? 60);
+const RATE_LIMIT_SWEEP_INTERVAL_MS = Number(
+  process.env.MCP_RATE_LIMIT_SWEEP_INTERVAL_MS ?? 60_000
+);
 const CONCURRENCY_MAX = Number(process.env.MCP_CONCURRENCY_MAX ?? 64);
 const TRUST_PROXY = process.env.MCP_TRUST_PROXY === "true";
 const TRUSTED_PROXY_IPS = new Set(
@@ -27,6 +31,13 @@ const TRUSTED_PROXY_IPS = new Set(
     .map((ip) => ip.trim())
     .filter(Boolean)
 );
+const REQUIRE_AUTH = process.env.MCP_REQUIRE_AUTH !== "false";
+const BIND_ADDRESS = process.env.MCP_BIND_ADDRESS || DEFAULT_BIND_ADDRESS;
+const CORS_ALLOWED_ORIGINS = (process.env.MCP_CORS_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const CORS_ALLOW_ALL = CORS_ALLOWED_ORIGINS.includes("*");
 const JWT_AUDIENCE = process.env.CONTEXT7_JWT_AUDIENCE || RESOURCE_URL;
 const JWT_AUTHORIZED_PARTY = process.env.CONTEXT7_JWT_AZP || "context7-mcp";
 const OAUTH_METADATA_TIMEOUT_MS = Number(process.env.MCP_OAUTH_METADATA_TIMEOUT_MS ?? 5000);
@@ -36,6 +47,7 @@ const OAUTH_METADATA_RETRY_COUNT = Number(process.env.MCP_OAUTH_METADATA_RETRY_C
 const program = new Command()
   .option("--transport <stdio|http>", "transport type", "stdio")
   .option("--port <number>", "port for HTTP transport", DEFAULT_PORT.toString())
+  .option("--bind <address>", "bind address for HTTP transport", DEFAULT_BIND_ADDRESS)
   .option("--api-key <key>", "API key for authentication (or set CONTEXT7_API_KEY env var)")
   .allowUnknownOption() // let MCP Inspector / other wrappers pass through extra flags
   .parse(process.argv);
@@ -43,6 +55,7 @@ const program = new Command()
 const cliOptions = program.opts<{
   transport: string;
   port: string;
+  bind: string;
   apiKey?: string;
 }>();
 
@@ -61,6 +74,7 @@ const TRANSPORT_TYPE = (cliOptions.transport || "stdio") as "stdio" | "http";
 // Disallow incompatible flags based on transport
 const passedPortFlag = process.argv.includes("--port");
 const passedApiKeyFlag = process.argv.includes("--api-key");
+const passedBindFlag = process.argv.includes("--bind");
 
 if (TRANSPORT_TYPE === "http" && passedApiKeyFlag) {
   console.error(
@@ -74,11 +88,17 @@ if (TRANSPORT_TYPE === "stdio" && passedPortFlag) {
   process.exit(1);
 }
 
+if (TRANSPORT_TYPE === "stdio" && passedBindFlag) {
+  console.error("The --bind flag is not allowed when using --transport stdio.");
+  process.exit(1);
+}
+
 // HTTP port configuration
 const CLI_PORT = (() => {
   const parsed = parseInt(cliOptions.port, 10);
   return isNaN(parsed) ? undefined : parsed;
 })();
+const CLI_BIND_ADDRESS = cliOptions.bind?.trim() || undefined;
 
 const requestContext = new AsyncLocalStorage<ClientContext>();
 
@@ -110,9 +130,18 @@ function normalizeIp(value: string | undefined): string | undefined {
   return value.replace(/^::ffff:/, "");
 }
 
+function isPrivateIp(ip: string): boolean {
+  return (
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    ip.startsWith("127.") ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)
+  );
+}
+
 function isTrustedProxy(req: express.Request): boolean {
-  if (TRUST_PROXY) return true;
   const remoteAddress = normalizeIp(req.socket?.remoteAddress);
+  if (TRUST_PROXY) return true;
   if (!remoteAddress) return false;
   return TRUSTED_PROXY_IPS.has(remoteAddress);
 }
@@ -126,16 +155,18 @@ function getClientIp(req: express.Request): string | undefined {
 
   if (forwardedFor && isTrustedProxy(req)) {
     const ips = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-    const ipList = ips.split(",").map((ip) => ip.trim());
+    const ipsValue = typeof ips === "string" ? ips : String(ips ?? "");
+    if (ipsValue.length > 1000) return normalizeIp(req.socket?.remoteAddress);
+
+    const ipList = ipsValue
+      .split(",")
+      .map((ip) => ip.trim())
+      .filter(Boolean)
+      .map((ip) => ip.replace(/^::ffff:/, ""));
 
     for (const ip of ipList) {
-      const plainIp = ip.replace(/^::ffff:/, "");
-      if (
-        !plainIp.startsWith("10.") &&
-        !plainIp.startsWith("192.168.") &&
-        !/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(plainIp)
-      ) {
-        return plainIp;
+      if (!isPrivateIp(ip)) {
+        return ip;
       }
     }
     return normalizeIp(ipList[0]);
@@ -333,9 +364,10 @@ async function main() {
 
   if (transportType === "http") {
     const initialPort = CLI_PORT ?? DEFAULT_PORT;
+    const bindAddress = CLI_BIND_ADDRESS || BIND_ADDRESS;
 
     const app = express();
-    app.set("trust proxy", TRUST_PROXY || TRUSTED_PROXY_IPS.size > 0 ? 1 : false);
+    app.set("trust proxy", false);
     app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
     let activeRequests = 0;
@@ -369,6 +401,7 @@ async function main() {
     });
 
     const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+    let lastRateLimitSweep = Date.now();
     app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (req.method === "OPTIONS") {
         next();
@@ -377,6 +410,14 @@ async function main() {
 
       const key = getClientIp(req) ?? normalizeIp(req.socket?.remoteAddress) ?? "unknown";
       const now = Date.now();
+      if (now - lastRateLimitSweep >= RATE_LIMIT_SWEEP_INTERVAL_MS) {
+        for (const [entryKey, entryValue] of rateLimitStore.entries()) {
+          if (now >= entryValue.resetAt) {
+            rateLimitStore.delete(entryKey);
+          }
+        }
+        lastRateLimitSweep = now;
+      }
       const entry = rateLimitStore.get(key);
 
       if (!entry || now >= entry.resetAt) {
@@ -399,7 +440,26 @@ async function main() {
     });
 
     app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      const origin = req.headers.origin;
+      if (!origin) {
+        next();
+        return;
+      }
+
+      const allowed =
+        CORS_ALLOW_ALL || CORS_ALLOWED_ORIGINS.includes(origin) ? origin : undefined;
+
+      if (!allowed) {
+        if (req.method === "OPTIONS") {
+          res.sendStatus(403);
+          return;
+        }
+        res.status(403).json({ error: "cors_not_allowed", message: "Origin not allowed." });
+        return;
+      }
+
+      res.setHeader("Access-Control-Allow-Origin", CORS_ALLOW_ALL ? "*" : allowed);
+      res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS,DELETE");
       res.setHeader(
         "Access-Control-Allow-Headers",
@@ -529,9 +589,9 @@ async function main() {
       }
     };
 
-    // Anonymous access endpoint - no authentication required
+    // MCP endpoint - authentication required unless explicitly disabled
     app.all("/mcp", async (req, res) => {
-      await handleMcpRequest(req, res, { requireAuth: false, requireJwt: false });
+      await handleMcpRequest(req, res, { requireAuth: REQUIRE_AUTH, requireJwt: false });
     });
 
     // OAuth-protected endpoint - requires authentication
@@ -595,7 +655,7 @@ async function main() {
     });
 
     const startServer = (port: number, maxAttempts = 10) => {
-      const httpServer = app.listen(port);
+      const httpServer = app.listen(port, bindAddress);
 
       httpServer.once("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EADDRINUSE" && port < initialPort + maxAttempts) {
@@ -609,7 +669,7 @@ async function main() {
 
       httpServer.once("listening", () => {
         console.error(
-          `Context7 Documentation MCP Server v${SERVER_VERSION} running on HTTP at http://localhost:${port}/mcp`
+          `Context7 Documentation MCP Server v${SERVER_VERSION} running on HTTP at http://${bindAddress}:${port}/mcp`
         );
       });
     };

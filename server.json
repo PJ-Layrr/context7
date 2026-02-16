@@ -29,6 +29,42 @@
           "description": "API key for authentication",
           "isRequired": false,
           "isSecret": true
+        },
+        {
+          "name": "MCP_REQUIRE_AUTH",
+          "description": "Require authentication for /mcp (default true)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_BIND_ADDRESS",
+          "description": "Bind address for HTTP transport (default 127.0.0.1)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_CORS_ALLOWED_ORIGINS",
+          "description": "Comma-separated CORS allowlist (empty disables CORS)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_TRUST_PROXY",
+          "description": "Trust upstream proxies for X-Forwarded-For",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_TRUSTED_PROXY_IPS",
+          "description": "Comma-separated proxy IP allowlist for X-Forwarded-For",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_RATE_LIMIT_SWEEP_INTERVAL_MS",
+          "description": "Rate limit eviction interval in milliseconds",
+          "isRequired": false,
+          "isSecret": false
         }
       ]
     },
@@ -46,6 +82,42 @@
           "description": "API key for authentication",
           "isRequired": false,
           "isSecret": true
+        },
+        {
+          "name": "MCP_REQUIRE_AUTH",
+          "description": "Require authentication for /mcp (default true)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_BIND_ADDRESS",
+          "description": "Bind address for HTTP transport (default 127.0.0.1)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_CORS_ALLOWED_ORIGINS",
+          "description": "Comma-separated CORS allowlist (empty disables CORS)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_TRUST_PROXY",
+          "description": "Trust upstream proxies for X-Forwarded-For",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_TRUSTED_PROXY_IPS",
+          "description": "Comma-separated proxy IP allowlist for X-Forwarded-For",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "MCP_RATE_LIMIT_SWEEP_INTERVAL_MS",
+          "description": "Rate limit eviction interval in milliseconds",
+          "isRequired": false,
+          "isSecret": false
         }
       ]
     }
